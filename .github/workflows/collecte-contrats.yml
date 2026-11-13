@@ -1,0 +1,121 @@
+name: Collecte des contrats DaaS
+
+on:
+  workflow_dispatch:
+    inputs:
+      partitions:
+        description: "Nombre de jobs en parallèle"
+        type: choice
+        options: ["1", "2", "4"]
+        default: "2"
+      max_contrats:
+        description: "Maximum de contrats par job (0 = sans limite ; ex. 10 pour un essai)"
+        default: "0"
+      duree_minutes:
+        description: "Budget de temps par job, en minutes (max 330)"
+        default: "330"
+
+permissions:
+  contents: write
+
+# Même groupe que la collecte des transactions : les deux ne sollicitent jamais
+# l'API Routescan en même temps.
+concurrency:
+  group: collecte-daas
+  cancel-in-progress: false
+
+env:
+  DATASET_URL: https://github.com/blocksecteam/DaaS_dataset
+
+jobs:
+  preparer:
+    runs-on: ubuntu-latest
+    outputs:
+      matrice: ${{ steps.matrice.outputs.matrice }}
+    steps:
+      - id: matrice
+        env:
+          N: ${{ inputs.partitions }}
+        run: |
+          python3 -c "import json, os; n = int(os.environ['N']); print('matrice=' + json.dumps(list(range(n))))" >> "$GITHUB_OUTPUT"
+
+  collecter:
+    needs: preparer
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: ${{ fromJSON(needs.preparer.outputs.matrice) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Récupérer les listes publiées avec l'article
+        run: git clone --depth 1 "$DATASET_URL" donnees_article
+
+      - name: Collecter l'historique des contrats
+        env:
+          PARTITION: ${{ matrix.partition }}
+          PARTITIONS: ${{ inputs.partitions }}
+          MAX_CONTRATS: ${{ inputs.max_contrats }}
+          DUREE: ${{ inputs.duree_minutes }}
+        run: |
+          python collecte/collecte.py collecter-contrats \
+            --partition "$PARTITION" --partitions "$PARTITIONS" \
+            --max-contrats "$MAX_CONTRATS" --duree-minutes "$DUREE" \
+            --sortie "lots_bruts_contrats/run${GITHUB_RUN_ID}-a${GITHUB_RUN_ATTEMPT}-p${PARTITION}.jsonl"
+
+      - name: Sauvegarder le lot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contrats-p${{ matrix.partition }}
+          path: lots_bruts_contrats/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  enregistrer:
+    needs: collecter
+    if: always() && needs.collecter.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Récupérer les listes publiées avec l'article
+        run: git clone --depth 1 "$DATASET_URL" donnees_article
+
+      - name: Rassembler les lots
+        uses: actions/download-artifact@v4
+        with:
+          pattern: contrats-p*
+          path: lots_bruts_contrats
+          merge-multiple: true
+
+      - name: Compresser les lots et faire le bilan
+        run: |
+          python collecte/collecte.py ranger --contrats
+          python collecte/collecte.py bilan-contrats
+
+      - name: Commiter les résultats
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add donnees/contrats
+          if git diff --cached --quiet; then
+            echo "Rien de nouveau à commiter."
+            exit 0
+          fi
+          git commit -m "Collecte des contrats DaaS : run ${GITHUB_RUN_ID}"
+          for essai in 1 2 3; do
+            git pull --rebase && git push && exit 0
+            sleep 5
+          done
+          exit 1

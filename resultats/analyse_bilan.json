@@ -1,0 +1,55 @@
+{
+  "date_analyse_utc": "2026-11-13T12:25:04+00:00",
+  "transactions_analysees": 11524,
+  "part_du_dataset_pct": 13.23,
+  "facteur_extrapolation": 7.56,
+  "periode": [
+    "2023-03-02",
+    "2025-04-01"
+  ],
+  "cas": {
+    "erc20": 6574,
+    "eth": 4848,
+    "aucun": 102
+  },
+  "ratios_part_operateur": {
+    "15 %": 3928,
+    "20 %": 2598,
+    "17.5 %": 1171,
+    "10 %": 656,
+    "12.5 %": 190,
+    "25 %": 155,
+    "autre": 129,
+    "30 %": 127,
+    "33 %": 11,
+    "40 %": 9
+  },
+  "roles_selon_montants": {
+    "petit = opérateur": 8942,
+    "parts égales": 32
+  },
+  "gains_eth": {
+    "op": 106.37814181385602,
+    "aff": 1155.5692369185501
+  },
+  "prix_disponibles": true,
+  "gains_usd_echantillon": {
+    "op": 2079693.5706436327,
+    "aff": 11900100.473908065
+  },
+  "gains_usd_extrapoles": {
+    "op": 15714463.47196595,
+    "aff": 89918869.2265266
+  },
+  "versements_non_valorises": {
+    "erc20": 576
+  },
+  "victimes_echantillon": 6884,
+  "victimes_extrapolees_naif": 52016,
+  "origine_victime": {
+    "jetons": 6048,
+    "aucune": 1421,
+    "expediteur": 4055
+  },
+  "victimes_perte_moins_1000_usd_pct": 82.7
+}
