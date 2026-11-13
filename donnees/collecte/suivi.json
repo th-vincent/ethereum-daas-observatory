@@ -1,15 +1,15 @@
 {
-  "date_utc": "2026-11-13T14:27:46+00:00",
+  "date_utc": "2026-11-13T17:27:07+00:00",
   "transactions_dataset": 87077,
-  "collectees": 33862,
+  "collectees": 48643,
   "introuvables": 0,
-  "en_erreur": 0,
-  "restantes": 53215,
-  "progression_pct": 38.89,
+  "en_erreur": 251,
+  "restantes": 38183,
+  "progression_pct": 55.86,
   "contenu_des_collectees": {
-    "avec_eth_interne": 14477,
-    "avec_erc20": 19300,
-    "avec_nft": 2,
+    "avec_eth_interne": 25616,
+    "avec_erc20": 34048,
+    "avec_nft": 3,
     "echouees_onchain": 0
   }
 }
