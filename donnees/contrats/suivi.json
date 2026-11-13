@@ -1,0 +1,14 @@
+{
+  "date_utc": "2026-11-13T13:27:17+00:00",
+  "contrats_dataset": 1910,
+  "collectes": 20,
+  "en_erreur": 0,
+  "restants": 1890,
+  "progression_pct": 1.05,
+  "lignes_collectees": {
+    "transactions": 1719,
+    "eth_internes": 1101,
+    "jetons": 374,
+    "avec_avertissement": 0
+  }
+}
