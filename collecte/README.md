@@ -58,3 +58,37 @@ python collecte/collecte.py collecter --max-transactions 20
 python collecte/collecte.py ranger
 python collecte/collecte.py bilan
 ```
+
+## Collecte des contrats
+
+Deuxième workflow, **Collecte des contrats DaaS** : historique complet de chacun des
+1 910 contrats de partage (dépôts des victimes, retraits, transferts de jetons), pour
+retrouver les victimes qui n'apparaissent pas dans les transactions publiées (contrats
+qui accumulent les fonds puis les reversent plus tard via `withdraw`).
+
+Mêmes paramètres et même reprise que la collecte des transactions (`max_contrats = 10`
+pour un essai). Les deux workflows ne tournent jamais en même temps : si l'un est lancé
+pendant l'autre, il attend.
+
+Résultats : `donnees/contrats/lots/*.jsonl.gz` (une ligne par contrat) et
+`donnees/contrats/suivi.json`.
+
+```json
+{"contrat": "0x…", "statut": "ok",
+ "creation": {"createur": "0x…", "tx": "0x…"},
+ "transactions": [{"tx": "0x…", "bloc": 17647631, "ts": 1688802143, "de": "0x…", "vers": "0x…",
+                   "wei": "0", "erreur": false, "methode": "0x00f714ce", "fonction": "withdraw"}],
+ "eth_internes": [{"tx": "0x…", "bloc": …, "ts": …, "de": "0x…", "vers": "0x…", "wei": "…", "type": "call", "erreur": false}],
+ "jetons": [{"tx": "0x…", "bloc": …, "ts": …, "norme": "erc20", "jeton": "0x…", "de": "0x…", "vers": "0x…",
+             "symbole": "USDC", "quantite": "1000000", "decimales": "6"}],
+ "avertissements": []}
+```
+
+- `transactions` : transactions envoyées au contrat ou par lui (dépôts « Claim », retraits…) ;
+- `eth_internes` : mouvements d'ETH internes impliquant le contrat ;
+- `jetons` : transferts ERC-20 (`decimales` fourni), ERC-721 et ERC-1155 impliquant le contrat ;
+- `avertissements` : informations facultatives indisponibles (création, ERC-1155), sans
+  bloquer le reste.
+
+En local : `python collecte/collecte.py collecter-contrats --max-contrats 3`, puis
+`ranger --contrats` et `bilan-contrats`.

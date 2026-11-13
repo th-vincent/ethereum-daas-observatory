@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Collecte des transferts des transactions de partage DaaS (IMC 2025) via l'API Routescan.
 
-Trois sous-commandes :
-  collecter  interroge l'API pour les transactions pas encore collectées (reprise automatique) ;
-  ranger     compresse les lots bruts produits par « collecter » dans donnees/collecte/lots/ ;
-  bilan      compte ce qui est collecté, en erreur ou restant, et écrit suivi.json.
+Sous-commandes :
+  collecter           transactions publiées pas encore collectées (reprise automatique) ;
+  collecter-contrats  historique complet des contrats de partage pas encore collectés ;
+  ranger              compresse les lots bruts (--contrats pour ceux des contrats) ;
+  bilan               avancement de la collecte des transactions (suivi.json) ;
+  bilan-contrats      avancement de la collecte des contrats.
 
-Pour chaque transaction, deux appels :
+Pour chaque transaction publiée, deux appels :
   - eth_getTransactionReceipt : expéditeur, contrat appelé, succès, bloc, événements
     (transferts ERC-20, ERC-721 et ERC-1155) ;
   - txlistinternal : transferts d'ETH internes et horodatage.
+
+Pour chaque contrat : création, transactions reçues, transferts d'ETH internes,
+transferts ERC-20 / ERC-721 / ERC-1155 (6 appels, plus si l'historique dépasse une page).
 
 Bibliothèque standard uniquement. Aucune clé ni aucun wallet requis.
 """
@@ -32,6 +37,9 @@ RACINE = Path(__file__).resolve().parent.parent
 DATASET = RACINE / "donnees_article"
 COLLECTE = RACINE / "donnees" / "collecte"
 LOTS = COLLECTE / "lots"
+CONTRATS = RACINE / "donnees" / "contrats"
+LOTS_CONTRATS = CONTRATS / "lots"
+TAILLE_PAGE = int(os.environ.get("COLLECTE_TAILLE_PAGE", "10000"))  # maximum de l'API
 
 API = os.environ.get(
     "COLLECTE_API", "https://api.routescan.io/v2/network/mainnet/evm/1/etherscan/api")
@@ -67,14 +75,14 @@ def lire_enregistrements(dossiers):
                 print(f"Lot illisible ignoré : {chemin} ({erreur})", file=sys.stderr)
 
 
-def etats_connus(dossiers):
-    """Dernier statut connu de chaque transaction."""
+def etats_connus(dossiers, cle="tx"):
+    """Dernier statut connu de chaque transaction (ou de chaque contrat, cle="contrat")."""
     etats = {}
     for e in lire_enregistrements(dossiers):
-        if "tx" in e:
+        if cle in e:
             # Un succès n'est jamais écrasé par une erreur ultérieure.
-            if etats.get(e["tx"]) != "ok":
-                etats[e["tx"]] = e.get("statut")
+            if etats.get(e[cle]) != "ok":
+                etats[e[cle]] = e.get("statut")
     return etats
 
 
@@ -140,6 +148,46 @@ class ClientRoutescan:
         if str(d.get("status")) == "0" and "no transactions found" in message:
             return []
         raise ValueError(f"txlistinternal : {d.get('message')} ({str(resultat)[:100]})")
+
+    def liste(self, action, **parametres):
+        """Réponse de type liste du module account ; [] si rien n'est trouvé."""
+        d = self.appeler(dict(module="account", action=action, **parametres))
+        resultat = d.get("result")
+        if str(d.get("status")) == "1" and isinstance(resultat, list):
+            return resultat
+        message = str(d.get("message", "")).lower()
+        if str(d.get("status")) == "0" and ("no transactions found" in message
+                                            or "no records found" in message):
+            return []
+        raise ValueError(f"{action} : {d.get('message')} ({str(resultat)[:100]})")
+
+    def historique(self, action, adresse):
+        """Tout l'historique d'une adresse, au-delà de la limite d'une page.
+
+        L'API ne renvoie qu'une page de TAILLE_PAGE lignes. Le dernier bloc d'une page
+        pleine peut être incomplet : on écarte ses lignes et on repart de ce bloc, qui
+        est alors relu en entier (pas de dédoublonnage : deux transferts identiques
+        dans une même transaction restent deux transferts).
+        """
+        lignes, debut = [], 0
+        while True:
+            page = self.liste(action, address=adresse, startblock=debut, endblock=99999999,
+                              page=1, offset=TAILLE_PAGE, sort="asc")
+            if len(page) < TAILLE_PAGE:
+                return lignes + page
+            dernier = int(page[-1]["blockNumber"])
+            if int(page[0]["blockNumber"]) == dernier:
+                raise ValueError(f"{action} : plus de {TAILLE_PAGE} lignes dans le bloc {dernier}")
+            lignes += [l for l in page if int(l["blockNumber"]) != dernier]
+            debut = dernier
+
+    def creation(self, adresse):
+        d = self.appeler(dict(module="contract", action="getcontractcreation",
+                              contractaddresses=adresse))
+        resultat = d.get("result")
+        if str(d.get("status")) == "1" and isinstance(resultat, list) and resultat:
+            return resultat[0]
+        raise ValueError(f"getcontractcreation : {d.get('message')} ({str(resultat)[:100]})")
 
 
 # --------------------------------------------------------------------------- décodage
@@ -216,6 +264,64 @@ def enregistrement(tx, recu, internes):
     }
 
 
+# --------------------------------------------------------------------------- contrats
+
+def _bas(v):
+    return (v or "").lower()
+
+
+def compacter_tx(l):
+    return dict(tx=_bas(l.get("hash")), bloc=int(l["blockNumber"]), ts=int(l["timeStamp"]),
+                de=_bas(l.get("from")), vers=_bas(l.get("to")), wei=str(l.get("value") or "0"),
+                erreur=str(l.get("isError", "0")) != "0", methode=l.get("methodId", ""),
+                fonction=(l.get("functionName") or "").split("(")[0])
+
+
+def compacter_interne(l):
+    return dict(tx=_bas(l.get("hash")), bloc=int(l["blockNumber"]), ts=int(l["timeStamp"]),
+                de=_bas(l.get("from")), vers=_bas(l.get("to")), wei=str(l.get("value") or "0"),
+                type=l.get("type", ""), erreur=str(l.get("isError", "0")) != "0")
+
+
+def compacter_jeton(l, norme):
+    e = dict(tx=_bas(l.get("hash")), bloc=int(l["blockNumber"]), ts=int(l["timeStamp"]),
+             norme=norme, jeton=_bas(l.get("contractAddress")), de=_bas(l.get("from")),
+             vers=_bas(l.get("to")), symbole=l.get("tokenSymbol", ""))
+    if norme == "erc20":
+        e.update(quantite=str(l.get("value") or "0"), decimales=l.get("tokenDecimal"))
+    else:
+        e.update(id=str(l.get("tokenID", "")), quantite=str(l.get("tokenValue") or "1"))
+    return e
+
+
+def historique_contrat(client, contrat):
+    avertissements = []
+    try:
+        c = client.creation(contrat)
+        creation = dict(createur=_bas(c.get("contractCreator")), tx=_bas(c.get("txHash")))
+    except (ValueError, LimiteAtteinte, OSError) as erreur:
+        creation = None  # facultatif : certaines API ne le proposent pas
+        avertissements.append(f"creation: {erreur}"[:200])
+
+    jetons = [compacter_jeton(l, "erc20") for l in client.historique("tokentx", contrat)]
+    jetons += [compacter_jeton(l, "erc721") for l in client.historique("tokennfttx", contrat)]
+    try:
+        jetons += [compacter_jeton(l, "erc1155") for l in client.historique("token1155tx", contrat)]
+    except ValueError as erreur:
+        avertissements.append(f"token1155tx: {erreur}"[:200])
+
+    return {
+        "contrat": contrat,
+        "statut": "ok",
+        "creation": creation,
+        "transactions": [compacter_tx(l) for l in client.historique("txlist", contrat)],
+        "eth_internes": [compacter_interne(l) for l in client.historique("txlistinternal", contrat)],
+        "jetons": jetons,
+        "avertissements": avertissements,
+        "collecte_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
 # --------------------------------------------------------------------------- commandes
 
 def ordre_de_traitement(transactions):
@@ -275,9 +381,91 @@ def cmd_collecter(args):
     return 0
 
 
+def cmd_collecter_contrats(args):
+    tous = ordre_de_traitement(lire_liste("profit_sharing_contracts.log"))
+    etats = etats_connus([LOTS_CONTRATS, Path(args.sortie).parent], cle="contrat")
+    deja = {c for c, s in etats.items() if s == "ok"}
+    a_faire = [c for i, c in enumerate(tous)
+               if i % args.partitions == args.partition and c not in deja]
+    if args.max_contrats:
+        a_faire = a_faire[:args.max_contrats]
+
+    print(f"Partition {args.partition}/{args.partitions} : {len(a_faire)} contrats à "
+          f"collecter ({len(deja)} déjà faits sur {len(tous)}).", flush=True)
+    if not a_faire:
+        return 0
+
+    sortie = Path(args.sortie)
+    sortie.parent.mkdir(parents=True, exist_ok=True)
+    client = ClientRoutescan(args.intervalle)
+    fin = time.monotonic() + args.duree_minutes * 60
+    compte, echecs_consecutifs = Counter(), 0
+
+    with sortie.open("a", encoding="utf-8") as f:
+        for n, contrat in enumerate(a_faire, 1):
+            if time.monotonic() > fin:
+                print("Budget de temps atteint : arrêt propre.", flush=True)
+                break
+            try:
+                e = historique_contrat(client, contrat)
+                echecs_consecutifs = 0
+            except (LimiteAtteinte, OSError, ValueError, KeyError, TypeError) as erreur:
+                e = {"contrat": contrat, "statut": "erreur",
+                     "detail": f"{type(erreur).__name__}: {erreur}"[:300]}
+                echecs_consecutifs += 1
+            f.write(json.dumps(e, ensure_ascii=False) + "\n")
+            f.flush()
+            compte[e["statut"]] += 1
+            taille = (f"{len(e['transactions'])} tx, {len(e['eth_internes'])} internes, "
+                      f"{len(e['jetons'])} jetons" if e["statut"] == "ok" else e["detail"][:80])
+            print(f"  {n}/{len(a_faire)}  {contrat}  {e['statut']}  ({taille})", flush=True)
+            if echecs_consecutifs >= args.max_echecs:
+                print(f"{echecs_consecutifs} échecs consécutifs. "
+                      "Arrêt pour ne pas insister auprès de l'API.", flush=True)
+                break
+
+    print(f"Terminé : {dict(compte)} ({client.appels} appels)", flush=True)
+    return 0
+
+
+def cmd_bilan_contrats(args):
+    tous = set(lire_liste("profit_sharing_contracts.log"))
+    etats = etats_connus([LOTS_CONTRATS], cle="contrat")
+    statuts = Counter(etats.get(c, "restant") for c in tous)
+    contenu = Counter()
+    for e in lire_enregistrements([LOTS_CONTRATS]):
+        if e.get("statut") == "ok":
+            contenu["transactions"] += len(e["transactions"])
+            contenu["eth_internes"] += len(e["eth_internes"])
+            contenu["jetons"] += len(e["jetons"])
+            contenu["avec_avertissement"] += bool(e["avertissements"])
+    bilan = {
+        "date_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "contrats_dataset": len(tous),
+        "collectes": statuts["ok"],
+        "en_erreur": statuts["erreur"],
+        "restants": statuts["restant"],
+        "progression_pct": round(100 * statuts["ok"] / len(tous), 2),
+        "lignes_collectees": dict(contenu),
+    }
+    CONTRATS.mkdir(parents=True, exist_ok=True)
+    (CONTRATS / "suivi.json").write_text(json.dumps(bilan, ensure_ascii=False, indent=2) + "\n",
+                                         encoding="utf-8")
+    texte = ["| Indicateur | Valeur |", "|---|---|"]
+    texte += [f"| {k} | {v} |" for k, v in bilan.items() if k != "lignes_collectees"]
+    texte += [f"| {k} | {v} |" for k, v in contenu.items()]
+    print("\n".join(texte))
+    resume = os.environ.get("GITHUB_STEP_SUMMARY")
+    if resume:
+        with open(resume, "a", encoding="utf-8") as f:
+            f.write("## Collecte des contrats DaaS\n\n" + "\n".join(texte) + "\n")
+    return 0
+
+
 def cmd_ranger(args):
-    """Compresse chaque lot brut dans donnees/collecte/lots/."""
-    LOTS.mkdir(parents=True, exist_ok=True)
+    """Compresse chaque lot brut dans le dossier de lots choisi."""
+    destination = LOTS_CONTRATS if args.contrats else LOTS
+    destination.mkdir(parents=True, exist_ok=True)
     source = Path(args.source)
     fichiers = sorted(source.rglob("*.jsonl")) if source.exists() else []
     for chemin in fichiers:
@@ -291,7 +479,7 @@ def cmd_ranger(args):
                     continue
         if not lignes:
             continue
-        cible = LOTS / (chemin.name + ".gz")
+        cible = destination / (chemin.name + ".gz")
         with gzip.open(cible, "wt", encoding="utf-8") as g:
             g.writelines(lignes)
         print(f"{cible.relative_to(RACINE)} : {len(lignes)} enregistrements")
@@ -349,14 +537,30 @@ def main():
     c.add_argument("--sortie", default=str(RACINE / "lots_bruts" / "lot.jsonl"))
     c.set_defaults(fonction=cmd_collecter)
 
+    cc = sp.add_parser("collecter-contrats", help="historique complet des contrats de partage")
+    cc.add_argument("--partition", type=int, default=0)
+    cc.add_argument("--partitions", type=int, default=1)
+    cc.add_argument("--max-contrats", type=int, default=0, help="0 = sans limite")
+    cc.add_argument("--duree-minutes", type=float, default=330)
+    cc.add_argument("--intervalle", type=float, default=0.55, help="secondes entre deux appels")
+    cc.add_argument("--max-echecs", type=int, default=5, help="échecs consécutifs avant arrêt")
+    cc.add_argument("--sortie", default=str(RACINE / "lots_bruts_contrats" / "lot.jsonl"))
+    cc.set_defaults(fonction=cmd_collecter_contrats)
+
     r = sp.add_parser("ranger", help="compresser les lots bruts")
-    r.add_argument("--source", default=str(RACINE / "lots_bruts"))
+    r.add_argument("--source", default=None)
+    r.add_argument("--contrats", action="store_true", help="lots de la collecte des contrats")
     r.set_defaults(fonction=cmd_ranger)
 
-    b = sp.add_parser("bilan", help="état d'avancement")
+    b = sp.add_parser("bilan", help="état d'avancement (transactions)")
     b.set_defaults(fonction=cmd_bilan)
 
+    bc = sp.add_parser("bilan-contrats", help="état d'avancement (contrats)")
+    bc.set_defaults(fonction=cmd_bilan_contrats)
+
     args = p.parse_args()
+    if args.commande == "ranger" and args.source is None:
+        args.source = str(RACINE / ("lots_bruts_contrats" if args.contrats else "lots_bruts"))
     if getattr(args, "partitions", 1) < 1 or not 0 <= getattr(args, "partition", 0) < getattr(args, "partitions", 1):
         p.error("partition invalide")
     try:
